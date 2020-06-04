@@ -6,14 +6,26 @@ using LinearAlgebra
 
 import BlockDavidson: apply_preconditioner!
 
-struct Preconditioner{TA,TB}
+"""
+A and B are supposed to be the diagonal entries of the matrices A and B
+"""
+struct DiagonalPreconditioner{TA,TB}
     A::TA
     B::TB
 end
 
-function BlockDavidson.apply_preconditioner!(y, P::Preconditioner, σ)
-    prec = Diagonal(P.A) - Diagonal(P.B) * 0.01
-    ldiv!(prec, y)
+DiagonalPreconditioner(A::AbstractMatrix, B::AbstractMatrix) = DiagonalPreconditioner(diag(A), diag(B))
+
+smooth(p) = (1 + p + sqrt(1 + (p - 1)^2)) / 2
+
+function BlockDavidson.apply_preconditioner!(y, P::DiagonalPreconditioner, Λ)
+    @inbounds for j = axes(y, 2)
+        λ = Λ[j]
+        for i = axes(y, 1)
+            y[i, j] /= smooth(P.A[i] - P.B[i] * λ)
+        end
+    end
+
     return y
 end
 
@@ -24,7 +36,7 @@ function setup(n = 1000; min_dim = 12, max_dim = 24, block_size = 4, evals = 4)
 
     s = State(CPU(), n = n, min_dimension = min_dim, max_dimension = max_dim, evals = evals)
 
-    P = Preconditioner(A, B)
+    P = DiagonalPreconditioner(A, B)
 
     return s, A, B, P
 end

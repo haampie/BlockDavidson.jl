@@ -185,7 +185,7 @@ function davidson!(s::State, A, B, P; evals = 4, block_size = 4, num_locked = 0,
         num_locked ≥ evals && break
 
         # Apply the preconditioner
-        apply_preconditioner!(Φ_next, P, s.Λ[num_locked + 1])
+        apply_preconditioner!(Φ_next, P, eigen.values[num_converged+1:num_ritz])
 
         # And increment the pointers
         block_start = curr_dim + 1
