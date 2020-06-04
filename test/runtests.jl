@@ -1,33 +1,8 @@
 using Test
 
 using BlockDavidson
-using BlockDavidson: davidson!, CPU, State
+using BlockDavidson: davidson!, CPU, State, DiagonalPreconditioner
 using LinearAlgebra
-
-import BlockDavidson: apply_preconditioner!
-
-"""
-A and B are supposed to be the diagonal entries of the matrices A and B
-"""
-struct DiagonalPreconditioner{TA,TB}
-    A::TA
-    B::TB
-end
-
-DiagonalPreconditioner(A::AbstractMatrix, B::AbstractMatrix) = DiagonalPreconditioner(diag(A), diag(B))
-
-smooth(p) = (1 + p + sqrt(1 + (p - 1)^2)) / 2
-
-function BlockDavidson.apply_preconditioner!(y, P::DiagonalPreconditioner, Λ)
-    @inbounds for j = axes(y, 2)
-        λ = Λ[j]
-        for i = axes(y, 1)
-            y[i, j] /= smooth(P.A[i] - P.B[i] * λ)
-        end
-    end
-
-    return y
-end
 
 function setup(n = 1000; min_dim = 12, max_dim = 24, block_size = 4, evals = 4)
     A = rand(n, n)
