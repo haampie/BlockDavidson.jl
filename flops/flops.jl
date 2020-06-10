@@ -29,7 +29,7 @@ function setup(n = 1000; min_dim = 12, max_dim = 24, block_size = 4, evals = 4)
     A = (A + A') ./ 2 + Diagonal(n+1:2n)
     B = Diagonal(fill(2.0, n))
 
-    s = State(CPU(), n = n, min_dimension = min_dim, max_dimension = max_dim, evals = evals)
+    s = State(CPU(), n = n, block_size = block_size, max_dimension = max_dim, evals = evals)
 
     P = DiagonalPreconditioner(A, B)
 
@@ -37,15 +37,15 @@ function setup(n = 1000; min_dim = 12, max_dim = 24, block_size = 4, evals = 4)
 end
 
 n = 6000
-evals = 150
-block_size = 12
-min_dimension, max_dimension = block_size, evals + 2block_size
+evals = 100
+block_size = 100
+min_dimension, max_dimension = block_size, evals + 3block_size
 count = OpCounter()
 # count = nothing
 
 s, A, B, P = setup(n, min_dim = min_dimension, max_dim = max_dimension, block_size = block_size, evals = evals)
 
-@time davidson!(s, A, B, P, counter = count, evals = evals, curr_dim = block_size, block_size = block_size, min_dimension = min_dimension, max_dimension = max_dimension, locking = true, tolerance = 1e-6)
+@time davidson!(s, A, B, P, counter = count, evals = evals, curr_dim = block_size, block_size = block_size, min_dimension = min_dimension, max_dimension = max_dimension, locking = true, tolerance = 1e-5)
 
 Φ = s.Φ[:, 1:evals]
 Λ = Diagonal(s.Λ[1:evals])

@@ -20,7 +20,7 @@ struct GPU end
 """
 Constructor for CPU
 """
-State(::CPU; n = 100, min_dimension = 10, max_dimension = 20, evals = 4) = State(
+State(::CPU; n = 100, block_size = 10, max_dimension = 20, evals = 4) = State(
     rand(n, max_dimension),
     zeros(n, max_dimension),
     zeros(n, max_dimension),
@@ -29,7 +29,7 @@ State(::CPU; n = 100, min_dimension = 10, max_dimension = 20, evals = 4) = State
     zeros(n, max_dimension),
     zeros(n, max_dimension),
     zeros(n, max_dimension),
-    zeros(n, min_dimension),
+    zeros(n, block_size),
     zeros(evals)
 )
 
@@ -65,7 +65,7 @@ of the search subspace. The user has to implement apply_preconditioner! for this
 To start with an initial guess, set curr_dim to the amount of vectors and put the
 vectors in s.Φ[:, 1:curr_dim]. They will be reorthogonalized.
 """
-function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothing, evals = 4, block_size = 4, num_locked = 0, curr_dim = 4, min_dimension = evals + 2, max_dimension = 10, tolerance = 1e-6, max_iter = 200, locking = true)
+function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothing, evals = 4, block_size = 4, num_locked = 0, curr_dim = 4, min_dimension = evals + 2, max_dimension = 10, tolerance = 1e-6, max_iter = size(A, 1) ÷ 10, locking = true)
     mA, nA = size(A)
     mB, nB = size(B)
     T = eltype(s.Φ)
@@ -173,62 +173,73 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         # Compute residual norms
         residual_norms = [norm(s.R[:, i]) for i = 1 : num_ritz]
 
-        @show round.(residual_norms, sigdigits = 2)
+        @show curr_dim iter round.(residual_norms, sigdigits = 2)
 
         @maybe counter counter.residual += 2 * size(s.R[:, 1:num_ritz], 1) * size(s.R[:, 1:num_ritz], 2)
 
-        # Count the number of converged vectors
-        search_converged = findlast(x -> x ≤ √(1 + num_locked) * tolerance, residual_norms)
+        # Count the number of converged vectors and number of lockable vectors (with stricter tolerance)
+        search_converged = findlast(x -> x ≤ tolerance, residual_norms)
+        search_lockable = findlast(x -> x ≤ 0.1tolerance, residual_norms)
         num_converged = search_converged === nothing ? 0 : search_converged
+        num_lockable = search_lockable === nothing ? 0 : search_lockable
         num_unconverged = num_ritz - num_converged
+        num_unlockable = num_ritz - num_lockable
 
-        # Lock converged vectors and shrink the subspace when necessary
-        should_restart = curr_dim + num_unconverged > max_dimension
+        should_restart = curr_dim + num_unlockable > max_dimension
+        everything_converged = num_converged + num_locked ≥ evals
+    
+        # Lock converged vectors and shrink the subspace when necessary        
+        if (locking && num_lockable ≥ 10) || everything_converged || should_restart
+            # Search subspace is divided into [locked][newly_locked][search space][free space]
+            # `1:new_curr_dim` is the range we want to keep including already locked vectors.
+            # - In case everything has converged, we should just keep 1:evals vecs.
+            # - In case of just a restart, keep min_dimension more vecs than the number of locked ones, including newly locked guys
+            # - In case of just locking, keep the full search subspace as is, but just do a change of basis.
+            new_curr_dim = if everything_converged
+                evals
+            elseif should_restart
+                num_locked + num_lockable + min_dimension
+            else # only lock
+                curr_dim
+            end
 
-        # @info "Step $iter" num_converged num_unconverged round.(residual_norms, sigdigits=2)'
-        
-        if (locking && num_converged ≥ 10) || num_converged + num_locked ≥ evals || should_restart
-            # We have to remove the converged Ritz vectors from the search subspace.
-            # Let's assume it's feasible to compute all eigenvectors. If not, we can maybe
-            # just QR a random matrix or so with the first few columns the pre-Ritz vectors.
+            # We have already computed AΨ, BΨ and Ψ for `num_ritz` vectors and `1:num_locked` don't have to be recomputed,
+            # so here we compute just the remainder `num_ritz+1:keep`
+            keep = new_curr_dim - num_locked
 
-            # When the search subspace has to be shrunken, we keep min_dimension of them, excluding converged ones
-            new_curr_dim = should_restart ? num_locked + num_converged + min_dimension : curr_dim
+            range_search = num_locked+1:num_locked+keep
 
-            keep = new_curr_dim - num_locked - num_ritz
+            mul!(s.AΨ[:, num_ritz+1:keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            mul!(s.BΨ[:, num_ritz+1:keep], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            mul!( s.Ψ[:, num_ritz+1:keep],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            
+            copyto!(s.AΦ[:, range_search], s.AΨ[:, 1:keep])
+            copyto!(s.BΦ[:, range_search], s.BΨ[:, 1:keep])
+            copyto!( s.Φ[:, range_search],  s.Ψ[:, 1:keep])
 
-            # Update the search subspace
-            range = num_locked+1:num_locked+num_ritz+keep
-
-            mul!(s.AΨ[:, num_ritz+1:num_ritz+keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:num_ritz+keep])
-            copyto!(s.AΦ[:, range], s.AΨ[:, 1:num_ritz+keep])
-
-            mul!(s.BΨ[:, num_ritz+1:num_ritz+keep], s.BΦ[:, num_locked+1 : curr_dim], eigen.vectors[:, num_ritz+1:num_ritz+keep])
-            copyto!(s.BΦ[:, range], s.BΨ[:, 1:num_ritz+keep])
-
-            mul!(s.Ψ[:, num_ritz+1:num_ritz+keep], s.Φ[:, num_locked+1 : curr_dim], eigen.vectors[:, num_ritz+1:num_ritz+keep])
-            copyto!(s.Φ[:, range], s.Ψ[:, 1:num_ritz+keep])
-
-            if should_restart
+            if should_restart || everything_converged
                 # Restart
-                @maybe counter counter.restarting += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:num_ritz+keep], 2)
+                @maybe counter counter.restarting += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nrestarts += 1
             else
                 # Locking
-                @maybe counter counter.locking += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:num_ritz+keep], 2)
+                @maybe counter counter.locking += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nlocks += 1
             end
 
             # "Compute" the new Galerkin projection, just a diagonal matrix of Ritz values
-            ΦᵀAΦ = s.ΦᵀAΦ[num_locked+1:num_locked+num_ritz+keep, num_locked+1:num_locked+num_ritz+keep]
+            ΦᵀAΦ = s.ΦᵀAΦ[range_search, range_search]
             fill!(ΦᵀAΦ, 0)
-            copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:num_ritz+keep])
+            copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:keep])
 
             if locking
-                num_locked += num_converged
+                num_locked += num_lockable
             end
 
+            @info "Shrinking search subspace from $curr_dim to $new_curr_dim"
             curr_dim = new_curr_dim
+
+            everything_converged && break
         end
 
         println("Converged: ", locking ? num_locked : num_converged, "/", evals)
@@ -236,23 +247,15 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         @maybe counter push!(counter.orthogonality, norm(s.Φ[:, 1:curr_dim]' * s.BΦ[:, 1:curr_dim] - I))
 
         # Copy the non-converged residual vectors over to the search subspace
-        Φ_next = s.Φ[:, curr_dim+1:curr_dim+num_unconverged]
-        copyto!(Φ_next, s.R[:, num_converged+1:num_ritz])
-
-        (num_locked ≥ evals || num_converged ≥ evals) && break
+        Φ_next = s.Φ[:, curr_dim+1:curr_dim+num_unlockable]
+        copyto!(Φ_next, s.R[:, num_lockable+1:num_ritz])
 
         # Apply the preconditioner
-        apply_preconditioner!(Φ_next, P, eigen.values[num_converged+1:num_ritz])
+        apply_preconditioner!(Φ_next, P, eigen.values[num_lockable+1:num_ritz])
 
         # And increment the pointers
         block_start = curr_dim + 1
         curr_dim += num_unconverged
-
-        # if locking
-        #     @show num_locked / evals curr_dim
-        # else
-        #     @show num_converged / evals curr_dim
-        # end
 
         iter += 1
     end

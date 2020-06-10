@@ -9,7 +9,7 @@ function setup(n = 1000; min_dimension = 12, max_dimension = 24, block_size = 4,
     A = (A + A') ./ 2 + Diagonal(1:n)
     B = Diagonal(fill(2.0, n))
 
-    s = State(CPU(), n = n, min_dimension = min_dimension, max_dimension = max_dimension, evals = evals)
+    s = State(CPU(), n = n, block_size = block_size, max_dimension = max_dimension, evals = evals)
 
     P = DiagonalPreconditioner(A, B)
 
@@ -21,10 +21,11 @@ end
     min_dimension, max_dimension = 20, 200
     block_size = 40
     evals = 100
+    tolerance = 1e-5
 
     s, A, B, P = setup(n, min_dimension = min_dimension, max_dimension = max_dimension, block_size = block_size, evals = evals)
 
-    davidson!(s, A, B, P, evals = evals, curr_dim = block_size, block_size = block_size, min_dimension = min_dimension, max_dimension = max_dimension)
+    davidson!(s, A, B, P, evals = evals, curr_dim = block_size, block_size = block_size, min_dimension = min_dimension, max_dimension = max_dimension, tolerance = tolerance)
 
     Φ = s.Φ[:, 1:evals]
     Λ = Diagonal(s.Λ[1:evals])
@@ -32,5 +33,7 @@ end
 
     resnorms = map(norm, eachcol(R))
 
-    @test all(x -> x < 1e-4, resnorms)
+    @show extrema(resnorms)
+
+    @test all(x -> x < tolerance, resnorms)
 end
