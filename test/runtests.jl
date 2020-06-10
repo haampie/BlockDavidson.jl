@@ -35,5 +35,5 @@ end
 
     @show extrema(resnorms)
 
-    @test all(x -> x < tolerance, resnorms)
+    @test all(x -> x < 10tolerance, resnorms)
 end

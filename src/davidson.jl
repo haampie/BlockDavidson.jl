@@ -87,8 +87,8 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         BΦ_b = s.BΦ[:, block_start:curr_dim]
 
         # Compute AΦ and BΦ for the new block
-        mul!(AΦ_b, A, Φ_b)
-        mul!(BΦ_b, B, Φ_b)
+        @timeit to "matrix product" mul!(AΦ_b, A, Φ_b)
+        @timeit to "matrix product" mul!(BΦ_b, B, Φ_b)
 
         @maybe counter counter.matrix_product += size(Φ_b, 2)
 
@@ -113,23 +113,25 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
         # @maybe counter counter.orthogonalization += 3 * 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(proj, 2)
 
-        proj = Φ_prev' * BΦ_b
+        @timeit to "Orthogonalization" begin
+            @timeit to "project" proj = Φ_prev' * BΦ_b
 
-        @maybe counter counter.orthogonalization += 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(BΦ_b, 2)
+            @maybe counter counter.orthogonalization += 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(BΦ_b, 2)
 
-        # Gemm
-        mul!(Φ_b, Φ_prev, proj, -one(T), one(T))
-        mul!(AΦ_b, AΦ_prev, proj, -one(T), one(T))
-        mul!(BΦ_b, BΦ_prev, proj, -one(T), one(T))
+            # Gemm
+            @timeit to "remove" mul!(Φ_b, Φ_prev, proj, -one(T), one(T))
+            @timeit to "remove" mul!(AΦ_b, AΦ_prev, proj, -one(T), one(T))
+            @timeit to "remove" mul!(BΦ_b, BΦ_prev, proj, -one(T), one(T))
 
-        @maybe counter counter.orthogonalization += 3 * 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(proj, 2)
+            @maybe counter counter.orthogonalization += 3 * 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(proj, 2)
 
-        # Interior orthogonalization
-        int_proj = Φ_b' * BΦ_b
-        C = cholesky!(Symmetric(int_proj))
-        rdiv!(Φ_b, C.L')
-        rdiv!(AΦ_b, C.L')
-        rdiv!(BΦ_b, C.L')
+            # Interior orthogonalization
+            @timeit to "project block" int_proj = Φ_b' * BΦ_b
+            @timeit to "cholesky" C = cholesky!(Symmetric(int_proj))
+            @timeit to "orth block" rdiv!(Φ_b, C.L')
+            @timeit to "orth block" rdiv!(AΦ_b, C.L')
+            @timeit to "orth block" rdiv!(BΦ_b, C.L')
+        end
 
         @show round.(diag(C.L), sigdigits = 2)
 
@@ -138,42 +140,41 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         @maybe counter counter.orthogonalization += 3 * size(Φ_b, 1) * size(Φ_b, 2) * size(C.L', 2) # trmm 3x
 
         # Update the low-dimensional problem
-        mul!(s.ΦᵀAΦ[num_locked+1:curr_dim, block_start:curr_dim], s.Φ[:, num_locked+1:curr_dim]', AΦ_b)
-        copyto!(s.ΦᵀAΦ[block_start:curr_dim, num_locked+1:block_start-1], s.ΦᵀAΦ[num_locked+1:block_start-1, block_start:curr_dim]')
+        @timeit to "low dimensional update" mul!(s.ΦᵀAΦ[num_locked+1:curr_dim, block_start:curr_dim], s.Φ[:, num_locked+1:curr_dim]', AΦ_b)
+        @timeit to "low dimensional update" copyto!(s.ΦᵀAΦ[block_start:curr_dim, num_locked+1:block_start-1], s.ΦᵀAΦ[num_locked+1:block_start-1, block_start:curr_dim]')
 
         # Copy the matrix over and solve the eigenvalue problem
         copyto!(s.ΦᵀBΦ, s.ΦᵀAΦ)
         ΦᵀAΦ_search_subspace = s.ΦᵀBΦ[num_locked+1:curr_dim, num_locked+1:curr_dim]
-        eigen = eigen!(Symmetric(ΦᵀAΦ_search_subspace))
+        @timeit to "solve eigenproblem" eigen = eigen!(Symmetric(ΦᵀAΦ_search_subspace))
 
         # Approximately 7n^3 flops for all eigenvalues and eigenvectors...
         @maybe counter counter.eigenproblem += 7 * size(ΦᵀAΦ_search_subspace, 1)^3
         @maybe counter push!(counter.eigenproblemsize, size(ΦᵀAΦ_search_subspace, 1))
 
         # Number of new Ritz vectors to compute.
-        num_ritz = min(block_size, evals - num_locked)
+        num_ritz = block_size
+        num_needed = min(num_ritz, evals - num_locked)
 
-        # Compute the Ritz vectors
-        mul!(s.Ψ[:, 1:num_ritz], s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
-
-        # Save the Ritz values / eigenvalues
-        copyto!(s.Λ[num_locked+1:num_locked+num_ritz], eigen.values[1:num_ritz])
-
-        # Compute ingredients for the residual block
-        mul!(s.AΨ[:, 1:num_ritz], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
-        mul!(s.BΨ[:, 1:num_ritz], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+        # Compute the Ritz vectors Ψ and AΨ and BΨ.
+        @timeit to "compute Ψ"  mul!( s.Ψ[:, 1:num_ritz],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+        @timeit to "compute AΨ" mul!(s.AΨ[:, 1:num_ritz], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+        @timeit to "compute BΨ" mul!(s.BΨ[:, 1:num_ritz], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
 
         @maybe counter counter.residual += 3 * 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
 
+        # Save the Ritz values / eigenvalues
+        copyto!(s.Λ[num_locked+1:num_locked+num_needed], eigen.values[1:num_needed])
+
         # Copy the residual R = B * Ψ * Λ - A * Ψ
-        copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
-        rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
-        s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
+        @timeit to "compute R" copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
+        @timeit to "compute R" rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
+        @timeit to "compute R" s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
 
         @maybe counter counter.residual += 2 * size(s.R[:, 1:num_ritz], 1) * size(s.R[:, 1:num_ritz], 2)
 
         # Compute residual norms
-        residual_norms = [norm(s.R[:, i]) for i = 1 : num_ritz]
+        @timeit to "compute norm(R)" residual_norms = [norm(s.R[:, i]) for i = 1 : num_ritz]
 
         @show curr_dim iter round.(residual_norms, sigdigits = 2)
 
@@ -181,17 +182,14 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
         # Count the number of converged vectors and number of lockable vectors (with stricter tolerance)
         search_converged = findlast(x -> x ≤ tolerance, residual_norms)
-        search_lockable = findlast(x -> x ≤ 0.1tolerance, residual_norms)
         num_converged = search_converged === nothing ? 0 : search_converged
-        num_lockable = search_lockable === nothing ? 0 : search_lockable
         num_unconverged = num_ritz - num_converged
-        num_unlockable = num_ritz - num_lockable
 
-        should_restart = curr_dim + num_unlockable > max_dimension
+        should_restart = curr_dim + num_unconverged > max_dimension
         everything_converged = num_converged + num_locked ≥ evals
     
         # Lock converged vectors and shrink the subspace when necessary        
-        if (locking && num_lockable ≥ 10) || everything_converged || should_restart
+        if (locking && num_converged ≥ block_size ÷ 2) || everything_converged || should_restart
             # Search subspace is divided into [locked][newly_locked][search space][free space]
             # `1:new_curr_dim` is the range we want to keep including already locked vectors.
             # - In case everything has converged, we should just keep 1:evals vecs.
@@ -200,7 +198,7 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             new_curr_dim = if everything_converged
                 evals
             elseif should_restart
-                num_locked + num_lockable + min_dimension
+                num_locked + num_converged + min_dimension
             else # only lock
                 curr_dim
             end
@@ -211,9 +209,9 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
             range_search = num_locked+1:num_locked+keep
 
-            mul!(s.AΨ[:, num_ritz+1:keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
-            mul!(s.BΨ[:, num_ritz+1:keep], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
-            mul!( s.Ψ[:, num_ritz+1:keep],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            @timeit to "lock/restart" mul!(s.AΨ[:, num_ritz+1:keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            @timeit to "lock/restart" mul!(s.BΨ[:, num_ritz+1:keep], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+            @timeit to "lock/restart" mul!( s.Ψ[:, num_ritz+1:keep],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
             
             copyto!(s.AΦ[:, range_search], s.AΨ[:, 1:keep])
             copyto!(s.BΦ[:, range_search], s.BΨ[:, 1:keep])
@@ -230,30 +228,30 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             end
 
             # "Compute" the new Galerkin projection, just a diagonal matrix of Ritz values
-            ΦᵀAΦ = s.ΦᵀAΦ[range_search, range_search]
-            fill!(ΦᵀAΦ, 0)
-            copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:keep])
+            @timeit to "lock/restart" ΦᵀAΦ = s.ΦᵀAΦ[range_search, range_search]
+            @timeit to "lock/restart" fill!(ΦᵀAΦ, 0)
+            @timeit to "lock/restart" copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:keep])
 
             if locking
-                num_locked += num_lockable
+                num_locked += num_converged
             end
 
-            @info "Shrinking search subspace from $curr_dim to $new_curr_dim"
+            # @info "Shrinking search subspace from $curr_dim to $new_curr_dim"
             curr_dim = new_curr_dim
 
             everything_converged && break
         end
 
-        println("Converged: ", locking ? num_locked : num_converged, "/", evals)
+        # println("Converged: ", locking ? num_locked : num_converged, "/", evals)
 
-        @maybe counter push!(counter.orthogonality, norm(s.Φ[:, 1:curr_dim]' * s.BΦ[:, 1:curr_dim] - I))
+        # @maybe counter push!(counter.orthogonality, norm(s.Φ[:, 1:curr_dim]' * s.BΦ[:, 1:curr_dim] - I))
 
         # Copy the non-converged residual vectors over to the search subspace
-        Φ_next = s.Φ[:, curr_dim+1:curr_dim+num_unlockable]
-        copyto!(Φ_next, s.R[:, num_lockable+1:num_ritz])
+        Φ_next = s.Φ[:, curr_dim+1:curr_dim+num_unconverged]
+        @timeit to "prep new block" copyto!(Φ_next, s.R[:, num_converged+1:num_ritz])
 
         # Apply the preconditioner
-        apply_preconditioner!(Φ_next, P, eigen.values[num_lockable+1:num_ritz])
+        @timeit to "precondition" apply_preconditioner!(Φ_next, P, eigen.values[num_converged+1:num_ritz])
 
         # And increment the pointers
         block_start = curr_dim + 1

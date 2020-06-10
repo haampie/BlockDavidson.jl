@@ -15,12 +15,15 @@ function show(io::IO, a::OpCounter)
                   [a.locking, a.restarting, a.orthogonalization, a.eigenproblem, a.residual], 
                   title = "Flop count")
 
-    orth = lineplot(log10.(a.orthogonality), title = "‖Φ'SΦ - I‖₂", xlabel = "iteration", ylabel = "log10(norm)")
+    println(io, bar)
+    
+    if length(a.orthogonality) > 0
+        orth = lineplot(log10.(a.orthogonality), title = "‖Φ'SΦ - I‖₂", xlabel = "iteration", ylabel = "log10(norm)")
+        println(io, orth)
+    end
 
     eigen = histogram(a.eigenproblemsize, title = "Eigenproblem dimension")
 
-    println(io, bar)
-    println(io, orth)
     println(io, eigen)
 
     flops = a.locking + a.restarting + a.orthogonalization + a.eigenproblem + a.residual
@@ -41,13 +44,13 @@ end
 
 n = 6000
 evals = 100
-block_size = 50
+block_size = 32
 
 counters = OpCounter[]
 
 for repeat = 1:10
 
-    min_dimension, max_dimension = block_size, 300
+    min_dimension, max_dimension = block_size, evals + 4 * block_size
     count = OpCounter()
 
     s, A, B, P = setup(n, min_dim = min_dimension, max_dim = max_dimension, block_size = block_size, evals = evals)
@@ -58,7 +61,7 @@ for repeat = 1:10
     Λ = Diagonal(s.Λ[1:evals])
     R = A * Φ - B * Φ * Λ
 
-    # println(histogram(map(x -> log10(norm(x)), eachcol(R)), title = "log₁₀(residual norm)"))
+    println(histogram(map(x -> log10(norm(x)), eachcol(R)), title = "log₁₀(residual norm)"))
     # println(histogram(s.Λ[1:evals], title = "Eigenvalue distribution"))
     count !== nothing && println(count)
     push!(counters, count)
