@@ -131,6 +131,8 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         rdiv!(AΦ_b, C.L')
         rdiv!(BΦ_b, C.L')
 
+        @show round.(diag(C.L), sigdigits = 2)
+
         @maybe counter counter.orthogonalization += 2 * size(Φ_b, 1) * size(Φ_b, 2) * size(BΦ_b, 2) # int proj
         @maybe counter counter.orthogonalization += size(int_proj, 1)^3 ÷ 3 # cholesky
         @maybe counter counter.orthogonalization += 3 * size(Φ_b, 1) * size(Φ_b, 2) * size(C.L', 2) # trmm 3x
