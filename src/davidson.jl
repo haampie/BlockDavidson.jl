@@ -1,12 +1,11 @@
 """
 All state variables
 """
-struct State{TV,TAV,TBV,TVAV,TVBV,TR,TAX,TBX,TRes,TΛ}
+struct State{TV,TAV,TBV,TVAV,TR,TAX,TBX,TRes,TΛ}
     Φ::TV       # Search subspace Φ
     AΦ::TAV     # A * Φ
     BΦ::TBV     # B * Φ
     ΦᵀAΦ::TVAV  # Galerkin projection of A onto Φ
-    ΦᵀBΦ::TVBV  # temporary
     Ψ::TR       # Ritz vectors Ψ
     AΨ::TAX     # A * Ψ
     BΨ::TBX     # B * Ψ
@@ -25,10 +24,9 @@ State(::CPU; n = 100, block_size = 10, max_dimension = 20, evals = 4) = State(
     zeros(n, max_dimension),
     zeros(n, max_dimension),
     zeros(max_dimension, max_dimension),
-    zeros(max_dimension, max_dimension),
     zeros(n, max_dimension),
-    zeros(n, max_dimension),
-    zeros(n, max_dimension),
+    zeros(n, block_size),
+    zeros(n, block_size),
     zeros(n, block_size),
     zeros(evals)
 )
@@ -72,8 +70,8 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
     @assert mA == nA == mB == nB
     @assert size(s.Ψ, 2) ≥ min_dimension
-    @assert size(s.AΨ, 2) ≥ evals
-    @assert size(s.BΨ, 2) ≥ evals
+    @assert size(s.AΨ, 2) ≥ block_size
+    @assert size(s.BΨ, 2) ≥ block_size
     @assert num_locked ≤ curr_dim
     @assert max_dimension ≤ nA
 
@@ -97,10 +95,7 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         AΦ_prev = s.AΦ[:, 1:block_start - 1]
         BΦ_prev = s.BΦ[:, 1:block_start - 1]
 
-        # Orthogonalization: Φ_b := (I - Φ_prev * Φ_prev' * B) * Φ_b.
-        # Computed as: Φ_b := Φ_b - Φ_prev * (Φ_prev' * (BΦ_b))
-        #              AΦ_b := AΦ_b - (AΦ_prev)(Φ_prev' * (BΦ_b))
-        #              BΦ_b := BΦ_b - (BΦ_prev)(Φ_prev' * (BΦ_b))
+        # Orthogonalize a second time.
 
         # proj = Φ_prev' * BΦ_b
 
@@ -119,18 +114,23 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             @maybe counter counter.orthogonalization += 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(BΦ_b, 2)
 
             # Gemm
-            @timeit to "remove" mul!(Φ_b, Φ_prev, proj, -one(T), one(T))
-            @timeit to "remove" mul!(AΦ_b, AΦ_prev, proj, -one(T), one(T))
-            @timeit to "remove" mul!(BΦ_b, BΦ_prev, proj, -one(T), one(T))
+            @timeit to "remove" begin
+                mul!(Φ_b, Φ_prev, proj, -one(T), one(T))
+                mul!(AΦ_b, AΦ_prev, proj, -one(T), one(T))
+                mul!(BΦ_b, BΦ_prev, proj, -one(T), one(T))
+            end
 
             @maybe counter counter.orthogonalization += 3 * 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(proj, 2)
 
             # Interior orthogonalization
             @timeit to "project block" int_proj = Φ_b' * BΦ_b
             @timeit to "cholesky" C = cholesky!(Symmetric(int_proj))
-            @timeit to "orth block" rdiv!(Φ_b, C.L')
-            @timeit to "orth block" rdiv!(AΦ_b, C.L')
-            @timeit to "orth block" rdiv!(BΦ_b, C.L')
+
+            @timeit to "orth block" begin
+                rdiv!(Φ_b, C.L')
+                rdiv!(AΦ_b, C.L')
+                rdiv!(BΦ_b, C.L')
+            end
         end
 
         @show round.(diag(C.L), sigdigits = 2)
@@ -144,8 +144,7 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         @timeit to "low dimensional update" copyto!(s.ΦᵀAΦ[block_start:curr_dim, num_locked+1:block_start-1], s.ΦᵀAΦ[num_locked+1:block_start-1, block_start:curr_dim]')
 
         # Copy the matrix over and solve the eigenvalue problem
-        copyto!(s.ΦᵀBΦ, s.ΦᵀAΦ)
-        ΦᵀAΦ_search_subspace = s.ΦᵀBΦ[num_locked+1:curr_dim, num_locked+1:curr_dim]
+        ΦᵀAΦ_search_subspace = copy(s.ΦᵀAΦ[num_locked+1:curr_dim, num_locked+1:curr_dim])
         @timeit to "solve eigenproblem" eigen = eigen!(Symmetric(ΦᵀAΦ_search_subspace))
 
         # Approximately 7n^3 flops for all eigenvalues and eigenvectors...
@@ -167,9 +166,11 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         copyto!(s.Λ[num_locked+1:num_locked+num_needed], eigen.values[1:num_needed])
 
         # Copy the residual R = B * Ψ * Λ - A * Ψ
-        @timeit to "compute R" copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
-        @timeit to "compute R" rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
-        @timeit to "compute R" s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
+        @timeit to "compute R" begin
+            copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
+            rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
+            s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
+        end
 
         @maybe counter counter.residual += 2 * size(s.R[:, 1:num_ritz], 1) * size(s.R[:, 1:num_ritz], 2)
 
@@ -187,9 +188,12 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
         should_restart = curr_dim + num_unconverged > max_dimension
         everything_converged = num_converged + num_locked ≥ evals
+        should_lock = locking && num_converged ≥ block_size ÷ 2
+
+        should_change_basis = should_lock || everything_converged || should_restart
     
         # Lock converged vectors and shrink the subspace when necessary        
-        if (locking && num_converged ≥ block_size ÷ 2) || everything_converged || should_restart
+        if should_change_basis
             # Search subspace is divided into [locked][newly_locked][search space][free space]
             # `1:new_curr_dim` is the range we want to keep including already locked vectors.
             # - In case everything has converged, we should just keep 1:evals vecs.
@@ -207,15 +211,25 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             # so here we compute just the remainder `num_ritz+1:keep`
             keep = new_curr_dim - num_locked
 
-            range_search = num_locked+1:num_locked+keep
+            @timeit to "lock/restart" begin
+                # Copy the num_ritz vectors already computed
+                mul!(s.Ψ[:, num_ritz+1:keep], s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+                copyto!(s.Φ[:, num_locked+1:num_locked+keep], s.Ψ[:, 1:keep])
 
-            @timeit to "lock/restart" mul!(s.AΨ[:, num_ritz+1:keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
-            @timeit to "lock/restart" mul!(s.BΨ[:, num_ritz+1:keep], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
-            @timeit to "lock/restart" mul!( s.Ψ[:, num_ritz+1:keep],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
-            
-            copyto!(s.AΦ[:, range_search], s.AΨ[:, 1:keep])
-            copyto!(s.BΦ[:, range_search], s.BΨ[:, 1:keep])
-            copyto!( s.Φ[:, range_search],  s.Ψ[:, 1:keep])
+                # Make a change of basis for the rest
+                mul!(s.Ψ[:, num_ritz+1:keep], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+                copyto!(s.AΦ[:, num_locked+1:num_locked+num_ritz], s.AΨ[:, 1:num_ritz])
+                copyto!(s.AΦ[:, num_locked+num_ritz+1:num_locked+keep], s.Ψ[:, num_ritz+1:keep])
+
+                mul!(s.Ψ[:, num_ritz+1:keep], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+                copyto!(s.BΦ[:, num_locked+1:num_locked+num_ritz], s.BΨ[:, 1:num_ritz])
+                copyto!(s.BΦ[:, num_locked+num_ritz+1:num_locked+keep], s.Ψ[:, num_ritz+1:keep])
+
+                # "Compute" the new Galerkin projection, just a diagonal matrix of Ritz values
+                ΦᵀAΦ = s.ΦᵀAΦ[num_locked+1:num_locked+keep, num_locked+1:num_locked+keep]
+                fill!(ΦᵀAΦ, 0)
+                copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:keep])
+            end
 
             if should_restart || everything_converged
                 # Restart
@@ -227,16 +241,10 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
                 @maybe counter counter.nlocks += 1
             end
 
-            # "Compute" the new Galerkin projection, just a diagonal matrix of Ritz values
-            @timeit to "lock/restart" ΦᵀAΦ = s.ΦᵀAΦ[range_search, range_search]
-            @timeit to "lock/restart" fill!(ΦᵀAΦ, 0)
-            @timeit to "lock/restart" copyto!(ΦᵀAΦ[diagind(ΦᵀAΦ)], eigen.values[1:keep])
-
             if locking
                 num_locked += num_converged
             end
 
-            # @info "Shrinking search subspace from $curr_dim to $new_curr_dim"
             curr_dim = new_curr_dim
 
             everything_converged && break
