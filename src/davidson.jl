@@ -142,8 +142,10 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         @maybe counter counter.orthogonalization += 3 * size(Φ_b, 1) * size(Φ_b, 2) * size(C.L', 2) # trmm 3x
 
         # Update the low-dimensional problem
-        @timeit to "low dimensional update" mul!(s.ΦᵀAΦ[num_locked+1:curr_dim, block_start:curr_dim], s.Φ[:, num_locked+1:curr_dim]', AΦ_b)
-        @timeit to "low dimensional update" copyto!(s.ΦᵀAΦ[block_start:curr_dim, num_locked+1:block_start-1], s.ΦᵀAΦ[num_locked+1:block_start-1, block_start:curr_dim]')
+        @timeit to "low dimensional update" begin
+            mul!(s.ΦᵀAΦ[num_locked+1:curr_dim, block_start:curr_dim], s.Φ[:, num_locked+1:curr_dim]', AΦ_b)
+            copyto!(s.ΦᵀAΦ[block_start:curr_dim, num_locked+1:block_start-1], s.ΦᵀAΦ[num_locked+1:block_start-1, block_start:curr_dim]')
+        end
 
         # Copy the matrix over and solve the eigenvalue problem
         ΦᵀAΦ_search_subspace = copy(s.ΦᵀAΦ[num_locked+1:curr_dim, num_locked+1:curr_dim])
