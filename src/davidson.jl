@@ -85,8 +85,10 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         BΦ_b = s.BΦ[:, block_start:curr_dim]
 
         # Compute AΦ and BΦ for the new block
-        @timeit to "matrix product" mul!(AΦ_b, A, Φ_b)
-        @timeit to "matrix product" mul!(BΦ_b, B, Φ_b)
+        @timeit to "matrix product" begin
+            mul!(AΦ_b, A, Φ_b)
+            mul!(BΦ_b, B, Φ_b)
+        end
 
         @maybe counter counter.matrix_product += size(Φ_b, 2)
 
@@ -156,26 +158,28 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         num_needed = min(num_ritz, evals - num_locked)
 
         # Compute the Ritz vectors Ψ and AΨ and BΨ.
-        @timeit to "compute Ψ"  mul!( s.Ψ[:, 1:num_ritz],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
-        @timeit to "compute AΨ" mul!(s.AΨ[:, 1:num_ritz], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
-        @timeit to "compute BΨ" mul!(s.BΨ[:, 1:num_ritz], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+        @timeit to "compute residual" begin
+            @timeit to "compute Ψ"  mul!( s.Ψ[:, 1:num_ritz],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+            @timeit to "compute AΨ" mul!(s.AΨ[:, 1:num_ritz], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
+            @timeit to "compute BΨ" mul!(s.BΨ[:, 1:num_ritz], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
 
-        @maybe counter counter.residual += 3 * 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
+            @maybe counter counter.residual += 3 * 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
 
-        # Save the Ritz values / eigenvalues
-        copyto!(s.Λ[num_locked+1:num_locked+num_needed], eigen.values[1:num_needed])
+            # Save the Ritz values / eigenvalues
+            copyto!(s.Λ[num_locked+1:num_locked+num_needed], eigen.values[1:num_needed])
 
-        # Copy the residual R = B * Ψ * Λ - A * Ψ
-        @timeit to "compute R" begin
-            copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
-            rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
-            s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
+            # Copy the residual R = B * Ψ * Λ - A * Ψ
+            @timeit to "compute R" begin
+                copyto!(s.R[:, 1:num_ritz], s.BΨ[:, 1:num_ritz])
+                rmul!(s.R[:, 1:num_ritz], Diagonal(eigen.values[1:num_ritz]))
+                s.R[:, 1:num_ritz] .-= s.AΨ[:, 1:num_ritz]
+            end
+
+            @maybe counter counter.residual += 2 * size(s.R[:, 1:num_ritz], 1) * size(s.R[:, 1:num_ritz], 2)
+
+            # Compute residual norms
+            @timeit to "compute norm(R)" residual_norms = [norm(s.R[:, i]) for i = 1 : num_ritz]
         end
-
-        @maybe counter counter.residual += 2 * size(s.R[:, 1:num_ritz], 1) * size(s.R[:, 1:num_ritz], 2)
-
-        # Compute residual norms
-        @timeit to "compute norm(R)" residual_norms = [norm(s.R[:, i]) for i = 1 : num_ritz]
 
         @show curr_dim iter round.(residual_norms, sigdigits = 2)
 
@@ -232,11 +236,9 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             end
 
             if should_restart || everything_converged
-                # Restart
                 @maybe counter counter.restarting += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nrestarts += 1
             else
-                # Locking
                 @maybe counter counter.locking += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nlocks += 1
             end
