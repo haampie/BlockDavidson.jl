@@ -148,11 +148,10 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
 
         # Compute the Ritz vectors Ψ and AΨ and BΨ.
         @timeit to "compute residual" begin
-            @timeit to "compute Ψ"  mul!( s.Ψ[:, 1:num_ritz],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
             @timeit to "compute AΨ" mul!(s.AΨ[:, 1:num_ritz], s.AΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
             @timeit to "compute BΨ" mul!(s.BΨ[:, 1:num_ritz], s.BΦ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:num_ritz])
 
-            @maybe counter counter.residual += 3 * 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
+            @maybe counter counter.residual += 2 * 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
 
             # Save the Ritz values / eigenvalues
             copyto!(s.Λ[num_locked+1:num_locked+num_needed], eigen.values[1:num_needed])
@@ -205,8 +204,8 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             keep = new_curr_dim - num_locked
 
             @timeit to "lock/restart" begin
-                # Copy the num_ritz vectors already computed
-                mul!(s.Ψ[:, num_ritz+1:keep], s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, num_ritz+1:keep])
+                # Copy the num_ritz vectors
+                mul!(s.Ψ[:, 1:keep],  s.Φ[:, num_locked+1:curr_dim], eigen.vectors[:, 1:keep])
                 copyto!(s.Φ[:, num_locked+1:num_locked+keep], s.Ψ[:, 1:keep])
 
                 # Make a change of basis for the rest
@@ -225,9 +224,11 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
             end
 
             if should_restart || everything_converged
+                @maybe counter counter.restarting += 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
                 @maybe counter counter.restarting += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nrestarts += 1
             else
+                @maybe counter counter.locking += 2 * size(s.Φ[:, num_locked+1:curr_dim], 1) * size(s.Φ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, 1:num_ritz], 2)
                 @maybe counter counter.locking += 3 * 2 * size(s.AΦ[:, num_locked+1:curr_dim], 1) * size(s.AΦ[:, num_locked+1:curr_dim], 2) * size(eigen.vectors[:, num_ritz+1:keep], 2)
                 @maybe counter counter.nlocks += 1
             end
