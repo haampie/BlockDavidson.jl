@@ -97,19 +97,6 @@ function davidson!(s::State, A, B, P; counter::Union{Nothing,OpCounter} = nothin
         AΦ_prev = s.AΦ[:, 1:block_start - 1]
         BΦ_prev = s.BΦ[:, 1:block_start - 1]
 
-        # Orthogonalize a second time.
-
-        # proj = Φ_prev' * BΦ_b
-
-        # @maybe counter counter.orthogonalization += 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(BΦ_b, 2)
-
-        # # Gemm
-        # mul!(Φ_b, Φ_prev, proj, -one(T), one(T))
-        # mul!(AΦ_b, AΦ_prev, proj, -one(T), one(T))
-        # mul!(BΦ_b, BΦ_prev, proj, -one(T), one(T))
-
-        # @maybe counter counter.orthogonalization += 3 * 2 * size(Φ_prev, 1) * size(Φ_prev, 2) * size(proj, 2)
-
         @timeit to "Orthogonalization" begin
             @timeit to "project" proj = Φ_prev' * BΦ_b
 
